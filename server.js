@@ -3,7 +3,7 @@ const cors = require('cors');
 const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 10000;
-const PASS = process.env.ADMIN_PASS || 'ADMIN2026';
+const PASS = process.env.ADMIN_PASS || 'NUMEXADMIN2026';
 const DATA = './db.json';
 
 app.use(cors({ origin: '*' }));
@@ -22,14 +22,13 @@ function genCode() {
   return p;
 }
 
-// PLAN PRICES
 const PLANS = {
-  '3': { days: 3, price: 99, locations: 1, label: 'TRIAL' },
-  '7': { days: 7, price: 199, locations: 2, label: 'BASIC' },
-  '30': { days: 30, price: 599, locations: 4, label: 'PRO' }
+  '3':  { days: 3,  price: 99,  locations: 1, label: 'TRIAL', key: 'plan99' },
+  '7':  { days: 7,  price: 199, locations: 2, label: 'BASIC', key: 'plan199' },
+  '30': { days: 30, price: 599, locations: 4, label: 'PRO',   key: 'plan599' }
 };
 
-// PUBLIC: Verify access code
+// PUBLIC: Verify access code + get plan-specific prediction
 app.post('/access', (req, res) => {
   const { code, deviceId } = req.body;
   if (!code) return res.json({ ok: false, msg: 'Code daalo' });
@@ -37,8 +36,9 @@ app.post('/access', (req, res) => {
   const now = Date.now();
   const clean = code.trim().toUpperCase();
   const pwd = d.passwords.find(p => p.code === clean);
-  if (!pwd) return res.json({ ok: false, msg: 'Galat code — Telegram pe contact karo' });
-  if (pwd.expiry < now) return res.json({ ok: false, msg: 'Code expire ho gaya — naya lo' });
+  if (!pwd) return res.json({ ok: false, msg: 'Galat code — Telegram pe contact karo: @Winxking' });
+  if (pwd.expiry < now) return res.json({ ok: false, msg: 'Code expire ho gaya — naya lo: @Winxking' });
+
   if (!pwd.used) {
     pwd.used = true;
     pwd.activatedAt = now;
@@ -47,26 +47,37 @@ app.post('/access', (req, res) => {
     save(d);
   } else {
     if (pwd.deviceId && deviceId && pwd.deviceId !== deviceId) {
-      return res.json({ ok: false, msg: 'Ye code doosre phone pe use ho chuka hai. Naya lo — Telegram pe aao' });
+      return res.json({ ok: false, msg: 'Ye code doosre phone pe use ho chuka hai. Naya lo — @Winxking' });
     }
     if (!pwd.deviceId && deviceId) { pwd.deviceId = deviceId; save(d); }
   }
-  if (pwd.userExpiry < now) return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
+
+  if (pwd.userExpiry < now) return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo: @Winxking' });
+
   const dl = Math.ceil((pwd.userExpiry - now) / 86400000);
   const plan = PLANS[String(pwd.days)] || PLANS['30'];
-  const pred = d.today;
+
+  // Return ONLY this plan's prediction — other plans hidden
+  const today = d.today;
+  let planPred = null;
+  if (today && today[plan.key]) {
+    planPred = {
+      date: today.date,
+      locations: today[plan.key].locations || []
+    };
+  }
+
   return res.json({
     ok: true,
     daysLeft: dl,
     plan: plan,
-    locations: plan.locations,
-    hasPrediction: !!pred,
-    prediction: pred || null,
+    hasPrediction: !!planPred,
+    prediction: planPred,
     ad: (d.ad && d.ad.enabled) ? d.ad : null
   });
 });
 
-// PUBLIC: Get ad
+// PUBLIC: Ad
 app.get('/ad', (req, res) => {
   const d = load();
   res.json({ ok: true, ad: (d.ad && d.ad.enabled) ? d.ad : null });
@@ -86,7 +97,15 @@ app.post('/admin/pwd', (req, res) => {
   const code = genCode();
   const now = Date.now();
   const plan = PLANS[String(days)] || PLANS['30'];
-  d.passwords.push({ code, name, days, price: plan.price, createdAt: now, expiry: now + (30 * 86400000), used: false, userExpiry: null });
+  d.passwords.push({
+    code, name, days,
+    price: plan.price,
+    planKey: plan.key,
+    createdAt: now,
+    expiry: now + (30 * 86400000),
+    used: false,
+    userExpiry: null
+  });
   d.sold = (d.sold || 0) + 1;
   d.revenue = (d.revenue || 0) + plan.price;
   save(d);
@@ -102,16 +121,16 @@ app.delete('/admin/pwd/:code', (req, res) => {
   res.json({ ok: true });
 });
 
-// ADMIN: Set prediction (manual)
+// ADMIN: Set prediction (plan-wise)
 app.post('/admin/predict', (req, res) => {
   if (!auth(req)) return res.status(401).json({ ok: false });
-  const { numbers, extraNums } = req.body;
-  // numbers = { loc1: {main:[],spot:[]}, loc2: {...}, loc3: {...}, loc4: {...} }
+  const { plan99, plan199, plan599 } = req.body;
   const d = load();
   d.today = {
     date: new Date().toLocaleDateString('en-IN'),
-    numbers: numbers || {},
-    extraNums: (extraNums || []).slice(0, 8)
+    plan99: plan99 || null,
+    plan199: plan199 || null,
+    plan599: plan599 || null
   };
   save(d);
   res.json({ ok: true, prediction: d.today });
@@ -126,7 +145,7 @@ app.delete('/admin/today', (req, res) => {
   res.json({ ok: true });
 });
 
-// ADMIN: Ad management
+// ADMIN: Ad
 app.get('/admin/ad', (req, res) => {
   if (!auth(req)) return res.status(401).json({ ok: false });
   res.json({ ok: true, ad: load().ad || null });
@@ -147,4 +166,4 @@ app.delete('/admin/ad', (req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, '0.0.0.0', () => console.log('Server running on ' + PORT));
+app.listen(PORT, '0.0.0.0', () => console.log('WIN.X.KING running on ' + PORT));
