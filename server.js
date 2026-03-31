@@ -56,14 +56,27 @@ app.post('/access', (req, res) => {
   if (pwd.userExpiry < now) return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
   const dl = Math.ceil((pwd.userExpiry - now) / 86400000);
   const plan = PLANS[String(pwd.days)] || PLANS['30'];
-  const pred = d.today;
+  // Return only this plan's prediction
+  const today = d.today;
+  let planPred = null;
+  if (today) {
+    const planKeyMap = { 'TRIAL': 'plan99', 'BASIC': 'plan199', 'PRO': 'plan599' };
+    const planKey = planKeyMap[plan.label] || 'plan599';
+    if (today[planKey]) {
+      planPred = {
+        date: today.date,
+        locations: today[planKey].locations || [],
+        extraNums: today.extraNums || []
+      };
+    }
+  }
   return res.json({
     ok: true,
     daysLeft: dl,
     plan: plan,
     locations: plan.locations,
-    hasPrediction: !!pred,
-    prediction: pred || null,
+    hasPrediction: !!planPred,
+    prediction: planPred || null,
     ad: (d.ad && d.ad.enabled) ? d.ad : null
   });
 });
@@ -104,15 +117,16 @@ app.delete('/admin/pwd/:code', (req, res) => {
   res.json({ ok: true });
 });
 
-// ADMIN: Set prediction (manual)
+// ADMIN: Set prediction (plan-wise)
 app.post('/admin/predict', (req, res) => {
   if (!auth(req)) return res.status(401).json({ ok: false });
-  const { numbers, extraNums } = req.body;
-  // numbers = { loc1: {main:[],spot:[]}, loc2: {...}, loc3: {...}, loc4: {...} }
+  const { plan99, plan199, plan599, extraNums } = req.body;
   const d = load();
   d.today = {
     date: new Date().toLocaleDateString('en-IN'),
-    numbers: numbers || {},
+    plan99: plan99 || null,
+    plan199: plan199 || null,
+    plan599: plan599 || null,
     extraNums: (extraNums || []).slice(0, 8)
   };
   save(d);
