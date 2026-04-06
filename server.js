@@ -23,32 +23,30 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '2mb' }));
 
 // ── FIREBASE INIT ─────────────────────────────────────────
-// Private key fix: Render stores \n as literal text, not actual newlines
-// This handles both cases reliably
-function getPrivateKey() {
-  const raw = process.env.FIREBASE_PRIVATE_KEY || '';
-  // Case 1: Already has real newlines (some platforms inject correctly)
-  if (raw.includes('-----BEGIN')) return raw;
-  // Case 2: Has literal \n escape sequences (Render default)
-  return raw.replace(/\\n/g, '\n');
+// Private key: Render stores \n as literal text — handle all 3 cases
+function parsePrivateKey(raw) {
+  if (!raw) return '';
+  // Case 1: Already has real newlines (properly formatted)
+  if (raw.includes('\n') && raw.includes('-----BEGIN')) return raw;
+  // Case 2: Has literal \\n (double escaped — some env paste tools)
+  if (raw.includes('\\n')) return raw.split('\\n').join('\n');
+  // Case 3: Has literal \n text (most common Render issue)
+  return raw.split('\\n').join('\n');
 }
 
-let firebaseInitialized = false;
-try {
-  initializeApp({
-    credential: cert({
-      projectId:   process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey:  getPrivateKey(),
-    })
-  });
-  firebaseInitialized = true;
-  console.log('✅ Firebase initialized');
-} catch(e) {
-  console.error('❌ Firebase init FAILED:', e.message);
-  console.error('Check FIREBASE_PRIVATE_KEY format in Render env vars');
-}
+const privateKey = parsePrivateKey(process.env.FIREBASE_PRIVATE_KEY || '');
+console.log('🔑 Key starts with:', privateKey.substring(0, 30));
+console.log('🔑 Key has real newlines:', privateKey.includes('\n'));
+
+initializeApp({
+  credential: cert({
+    projectId:   process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey:  privateKey,
+  })
+});
 const db = getFirestore();
+console.log('✅ Firebase connected!');
 
 const COL = {
   passwords: () => db.collection('wxk_passwords'),
@@ -216,10 +214,6 @@ app.get('/admin/data', async (req, res) => {
     });
   } catch(e) {
     console.error('/admin/data error:', e.message);
-    // Firebase auth error — private key format problem
-    if (e.message && (e.message.includes('PEM') || e.message.includes('private key') || e.message.includes('credential') || e.message.includes('DECODER'))) {
-      return res.status(500).json({ ok: false, msg: 'Firebase key error — Render pe FIREBASE_PRIVATE_KEY dobara set karo (copy carefully from Firebase JSON)' });
-    }
     return res.status(500).json({ ok: false, msg: 'Server error: ' + e.message });
   }
 });
