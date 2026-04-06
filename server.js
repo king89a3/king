@@ -23,13 +23,31 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '2mb' }));
 
 // ── FIREBASE INIT ─────────────────────────────────────────
-initializeApp({
-  credential: cert({
-    projectId:   process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey:  (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
-  })
-});
+// Private key fix: Render stores \n as literal text, not actual newlines
+// This handles both cases reliably
+function getPrivateKey() {
+  const raw = process.env.FIREBASE_PRIVATE_KEY || '';
+  // Case 1: Already has real newlines (some platforms inject correctly)
+  if (raw.includes('-----BEGIN')) return raw;
+  // Case 2: Has literal \n escape sequences (Render default)
+  return raw.replace(/\\n/g, '\n');
+}
+
+let firebaseInitialized = false;
+try {
+  initializeApp({
+    credential: cert({
+      projectId:   process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey:  getPrivateKey(),
+    })
+  });
+  firebaseInitialized = true;
+  console.log('✅ Firebase initialized');
+} catch(e) {
+  console.error('❌ Firebase init FAILED:', e.message);
+  console.error('Check FIREBASE_PRIVATE_KEY format in Render env vars');
+}
 const db = getFirestore();
 
 const COL = {
@@ -198,6 +216,10 @@ app.get('/admin/data', async (req, res) => {
     });
   } catch(e) {
     console.error('/admin/data error:', e.message);
+    // Firebase auth error — private key format problem
+    if (e.message && (e.message.includes('PEM') || e.message.includes('private key') || e.message.includes('credential') || e.message.includes('DECODER'))) {
+      return res.status(500).json({ ok: false, msg: 'Firebase key error — Render pe FIREBASE_PRIVATE_KEY dobara set karo (copy carefully from Firebase JSON)' });
+    }
     return res.status(500).json({ ok: false, msg: 'Server error: ' + e.message });
   }
 });
