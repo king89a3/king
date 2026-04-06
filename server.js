@@ -17,7 +17,7 @@ if (!process.env.FIREBASE_PROJECT_ID) {
 
 const app  = express();
 const PORT = process.env.PORT || 10000;
-const ADMIN_PASS = process.env.ADMIN_PASS || 'NUMEXADMIN2026';
+const ADMIN_PASS = process.env.ADMIN_PASS || 'NUMEXADMIN2026'; // used only for startup log
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '2mb' }));
@@ -51,7 +51,11 @@ setInterval(() => { const n = Date.now(); Object.keys(rl).forEach(k => { if (n -
 function getIP(req) {
   return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || 'unknown';
 }
-function auth(req) { return req.headers['x-pass'] === ADMIN_PASS; }
+function auth(req) {
+  const pass = process.env.ADMIN_PASS;
+  if (!pass) { console.error('ADMIN_PASS env var not set!'); return false; }
+  return req.headers['x-pass'] === pass;
+}
 function genCode() {
   const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = '';
   for (let i = 0; i < 8; i++) { if (i === 4) s += '-'; s += c[Math.floor(Math.random() * c.length)]; }
@@ -259,4 +263,12 @@ app.post('/admin/logout/:code', async (req, res) => {
 // 404
 app.use((req, res) => res.status(404).json({ ok: false, msg: 'Invalid API' }));
 
-app.listen(PORT, '0.0.0.0', () => console.log('WIN.X.KING server on port ' + PORT));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('╔══════════════════════════════════════╗');
+  console.log('║    WIN.X.KING SERVER — ONLINE 🟢     ║');
+  console.log('╠══════════════════════════════════════╣');
+  console.log('║  Port    : ' + PORT);
+  console.log('║  Firebase: ' + (process.env.FIREBASE_PROJECT_ID ? '✅ ' + process.env.FIREBASE_PROJECT_ID : '❌ NOT SET'));
+  console.log('║  AdminPwd: ' + (process.env.ADMIN_PASS ? '✅ Set' : '❌ NOT SET — set ADMIN_PASS env var!'));
+  console.log('╚══════════════════════════════════════╝');
+});
