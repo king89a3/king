@@ -79,14 +79,30 @@ app.post('/verify', (req, res) => {
   const clean = code.trim().toUpperCase();
   const pwd = d.passwords.find(p => p.code === clean);
 
+  // Code hi nahi mila (server restart/db wipe) — client apna local session use kare
   if (!pwd) return res.json({ ok: false, msg: 'Session expired' });
-  if (pwd.sessionActive !== true) return res.json({ ok: false, msg: 'Session expired' });
+
+  // Code mila par kabhi activate nahi hua
   if (!pwd.used) return res.json({ ok: false, msg: 'Session expired' });
+
+  // Plan genuinely expire ho gaya
   if (!pwd.userExpiry || pwd.userExpiry < now) {
     return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
   }
+
+  // Device mismatch — kisi aur ka phone
   if (pwd.deviceId && deviceId && pwd.deviceId !== deviceId) {
     return res.json({ ok: false, msg: 'Session invalid — device mismatch' });
+  }
+
+  // NOTE: sessionActive check hata diya — server restart pe false ho jaata tha
+  // Ab sirf userExpiry se decide hoga — yahi sahi hai
+
+  // Session restore on verify (agar restart ke baad false tha)
+  if (!pwd.sessionActive) {
+    pwd.sessionActive = true;
+    pwd.lastLoginAt = now;
+    save(d);
   }
 
   const daysLeft = Math.ceil((pwd.userExpiry - now) / 86400000);
@@ -131,7 +147,7 @@ app.post('/access', (req, res) => {
     pwd.lastLoginAt = now;
     save(d);
   } else {
-    // Re-login
+    // Re-login (ya server restart ke baad pehli baar)
     if (pwd.deviceId && deviceId && pwd.deviceId !== deviceId) {
       return res.json({ ok: false, msg: 'Ye code doosre phone pe use ho chuka hai. Naya lo — Telegram pe aao' });
     }
