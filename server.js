@@ -1,15 +1,3 @@
-/**
- * WIN.X.KING SERVER — Firebase Firestore Edition
- *
- * SESSIONS: Stored in Firestore — survive server restart/sleep/redeploy
- * USER LOGOUT: Only on plan expiry OR admin force-logout
- * NO db.json — all data in Firestore
- *
- * Firestore Collections:
- *   passwords/{code}   — one doc per access code
- *   appdata/main       — sold, revenue, ad, today prediction
- */
-
 const express = require('express');
 const cors    = require('cors');
 const { initializeApp, cert } = require('firebase-admin/app');
