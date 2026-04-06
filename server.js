@@ -149,12 +149,24 @@ app.post('/verify', async (req, res) => {
   if (!code) return res.json({ ok: false });
   const clean = code.trim().toUpperCase();
   const pwd = await getPwd(clean);
+
+  // Basic checks
   if (!pwd || !pwd.used) return res.json({ ok: false, msg: 'Session expire — dobara login karo' });
+
   const now = Date.now();
-  if (pwd.userExpiry < now) return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
+
+  // ✅ FIX: Force logout check — admin ne logout kiya to session band
+  if (pwd.sessionActive === false) return res.json({ ok: false, msg: 'Session expire — dobara login karo' });
+
+  if (!pwd.userExpiry || pwd.userExpiry < now)
+    return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
+
   if (pwd.deviceId && deviceId && pwd.deviceId !== deviceId)
     return res.json({ ok: false, msg: 'Ye code doosre phone pe use ho chuka hai.' });
-  await savePwd(clean, { sessionActive: true, lastSeen: now });
+
+  // Update lastSeen (don't update sessionActive here — only /access sets it)
+  await savePwd(clean, { lastSeen: now });
+
   const daysLeft = Math.ceil((pwd.userExpiry - now) / 86400000);
   const plan = PLANS[String(pwd.days)] || PLANS['30'];
   const [today, ad] = await Promise.all([getToday(), getAd()]);
@@ -256,8 +268,9 @@ app.post('/admin/logout/:code', async (req, res) => {
   const code = req.params.code.toUpperCase();
   const pwd = await getPwd(code);
   if (!pwd) return res.json({ ok: false, msg: 'Code nahi mila' });
-  await savePwd(code, { sessionActive: false });
-  res.json({ ok: true });
+  // Clear session AND deviceId — user can re-login fresh on any device
+  await savePwd(code, { sessionActive: false, deviceId: null });
+  res.json({ ok: true, msg: 'User force logged out' });
 });
 
 // 404
