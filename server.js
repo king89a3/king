@@ -1,42 +1,54 @@
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
+/**
+ * WIN.X.KING SERVER — Firebase Firestore Edition
+ *
+ * SESSIONS: Stored in Firestore — survive server restart/sleep/redeploy
+ * USER LOGOUT: Only on plan expiry OR admin force-logout
+ * NO db.json — all data in Firestore
+ *
+ * Firestore Collections:
+ *   passwords/{code}   — one doc per access code
+ *   appdata/main       — sold, revenue, ad, today prediction
+ */
 
-const app = express();
+const express = require('express');
+const cors    = require('cors');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore }        = require('firebase-admin/firestore');
+
+const app  = express();
 const PORT = process.env.PORT || 10000;
 const PASS = process.env.ADMIN_PASS || 'NUMEXADMIN2026';
-const DATA = './db.json';
 
-// ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
 
-// ─── DB HELPERS ───────────────────────────────────────────────────────────────
-function load() {
-  try {
-    if (fs.existsSync(DATA)) {
-      return JSON.parse(fs.readFileSync(DATA, 'utf8'));
-    }
-  } catch (e) {
-    console.error('Failed to load db.json:', e.message);
-  }
-  return { passwords: [], today: null, sold: 0, revenue: 0, ad: null };
-}
+// ─── FIREBASE INIT ────────────────────────────────────────
+// Credentials come from Render environment variables — NEVER in code/git!
+initializeApp({
+  credential: cert({
+    projectId:   process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey:  process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  })
+});
 
-function save(d) {
-  try {
-    fs.writeFileSync(DATA, JSON.stringify(d));
-  } catch (e) {
-    console.error('Failed to save db.json:', e.message);
-  }
-}
+const db      = getFirestore();
+const PWD_COL = db.collection('passwords');           // access codes
+const APP_DOC = db.collection('appdata').doc('main'); // global app data
 
-// ─── AUTH HELPER ──────────────────────────────────────────────────────────────
+// ─── AUTH ─────────────────────────────────────────────────
 function isAdmin(req) {
   return req.headers['x-pass'] === PASS;
 }
 
-// ─── CODE GENERATOR ───────────────────────────────────────────────────────────
+// ─── PLAN CONFIG ──────────────────────────────────────────
+const PLANS = {
+  '3':  { days: 3,  price: 99,  locations: 1, label: 'TRIAL' },
+  '7':  { days: 7,  price: 199, locations: 2, label: 'BASIC' },
+  '30': { days: 30, price: 599, locations: 4, label: 'PRO'   },
+};
+
+// ─── HELPERS ──────────────────────────────────────────────
 function genCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
@@ -47,14 +59,6 @@ function genCode() {
   return code;
 }
 
-// ─── PLAN CONFIG ─────────────────────────────────────────────────────────────
-const PLANS = {
-  '3':  { days: 3,  price: 99,  locations: 1, label: 'TRIAL' },
-  '7':  { days: 7,  price: 199, locations: 2, label: 'BASIC' },
-  '30': { days: 30, price: 599, locations: 4, label: 'PRO'   },
-};
-
-// ─── HELPER: get plan prediction ─────────────────────────────────────────────
 function getPlanPrediction(today, planLabel) {
   if (!today) return null;
   const keyMap = { TRIAL: 'plan99', BASIC: 'plan199', PRO: 'plan599' };
@@ -67,232 +71,304 @@ function getPlanPrediction(today, planLabel) {
   };
 }
 
-// ─── PUBLIC: Verify session ───────────────────────────────────────────────────
-// Called on app startup — fast silent check, no session write.
-// Returns ok:true if session active, ok:false if expired or force-logged-out.
-app.post('/verify', (req, res) => {
+async function getAppData() {
+  try {
+    const snap = await APP_DOC.get();
+    if (snap.exists) return snap.data();
+  } catch (e) { console.error('getAppData:', e.message); }
+  return { sold: 0, revenue: 0, ad: null, today: null };
+}
+
+async function getPassword(code) {
+  try {
+    const snap = await PWD_COL.doc(code).get();
+    return snap.exists ? snap.data() : null;
+  } catch (e) { console.error('getPassword:', e.message); return null; }
+}
+
+// ─── HEALTH ───────────────────────────────────────────────
+app.get('/', (req, res) => res.json({ status: 'OK', db: 'Firestore' }));
+
+// ══════════════════════════════════════════════════════════
+// PUBLIC: VERIFY SESSION
+// Called every time user opens the app (auto-login).
+// All session data is in Firestore — server restart has NO effect.
+// ══════════════════════════════════════════════════════════
+app.post('/verify', async (req, res) => {
   const { code, deviceId } = req.body;
   if (!code) return res.json({ ok: false, msg: 'Code daalo' });
 
-  const d = load();
-  const now = Date.now();
   const clean = code.trim().toUpperCase();
-  const pwd = d.passwords.find(p => p.code === clean);
+  const now   = Date.now();
 
-  // Code hi nahi mila (server restart/db wipe) — client apna local session use kare
-  if (!pwd) return res.json({ ok: false, msg: 'Session expired' });
+  try {
+    const pwd = await getPassword(clean);
 
-  // Code mila par kabhi activate nahi hua
-  if (!pwd.used) return res.json({ ok: false, msg: 'Session expired' });
+    if (!pwd)                       return res.json({ ok: false, msg: 'Session expired' });
+    if (!pwd.used)                  return res.json({ ok: false, msg: 'Session expired' });
+    if (pwd.sessionActive !== true) return res.json({ ok: false, msg: 'Session expired' });
+    if (!pwd.userExpiry || pwd.userExpiry < now)
+      return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
+    if (pwd.deviceId && deviceId && pwd.deviceId !== deviceId)
+      return res.json({ ok: false, msg: 'Session invalid — device mismatch' });
 
-  // Plan genuinely expire ho gaya
-  if (!pwd.userExpiry || pwd.userExpiry < now) {
-    return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
+    const daysLeft  = Math.ceil((pwd.userExpiry - now) / 86400000);
+    const plan      = PLANS[String(pwd.days)] || PLANS['30'];
+    const appData   = await getAppData();
+    const prediction = getPlanPrediction(appData.today, plan.label);
+
+    return res.json({
+      ok: true,
+      daysLeft,
+      plan,
+      locations:     plan.locations,
+      hasPrediction: !!prediction,
+      prediction:    prediction || null,
+      ad: (appData.ad && appData.ad.enabled) ? appData.ad : null,
+    });
+  } catch (e) {
+    console.error('/verify error:', e.message);
+    return res.json({ ok: false, msg: 'Server error — try again' });
   }
-
-  // Device mismatch — kisi aur ka phone
-  if (pwd.deviceId && deviceId && pwd.deviceId !== deviceId) {
-    return res.json({ ok: false, msg: 'Session invalid — device mismatch' });
-  }
-
-  // NOTE: sessionActive check hata diya — server restart pe false ho jaata tha
-  // Ab sirf userExpiry se decide hoga — yahi sahi hai
-
-  // Session restore on verify (agar restart ke baad false tha)
-  if (!pwd.sessionActive) {
-    pwd.sessionActive = true;
-    pwd.lastLoginAt = now;
-    save(d);
-  }
-
-  const daysLeft = Math.ceil((pwd.userExpiry - now) / 86400000);
-  const plan = PLANS[String(pwd.days)] || PLANS['30'];
-  const prediction = getPlanPrediction(d.today, plan.label);
-
-  return res.json({
-    ok: true,
-    daysLeft,
-    plan,
-    locations: plan.locations,
-    hasPrediction: !!prediction,
-    prediction: prediction || null,
-    ad: (d.ad && d.ad.enabled) ? d.ad : null,
-  });
 });
 
-// ─── PUBLIC: Access / Login ───────────────────────────────────────────────────
-// First-time activation or re-login. Enforces one-device-per-code.
-app.post('/access', (req, res) => {
+// ══════════════════════════════════════════════════════════
+// PUBLIC: ACCESS / LOGIN
+// First-time activation OR re-login.
+// Device lock: once deviceId saved, only that device can re-login.
+// ══════════════════════════════════════════════════════════
+app.post('/access', async (req, res) => {
   const { code, deviceId } = req.body;
   if (!code) return res.json({ ok: false, msg: 'Code daalo' });
 
-  const d = load();
-  const now = Date.now();
   const clean = code.trim().toUpperCase();
-  const pwd = d.passwords.find(p => p.code === clean);
+  const now   = Date.now();
 
-  if (!pwd) return res.json({ ok: false, msg: 'Galat code — Telegram pe contact karo' });
+  try {
+    const pwd = await getPassword(clean);
+    if (!pwd) return res.json({ ok: false, msg: 'Galat code — Telegram pe contact karo' });
 
-  if (!pwd.used && pwd.expiry < now) {
-    return res.json({ ok: false, msg: 'Code expire ho gaya — naya lo' });
-  }
+    if (!pwd.used) {
+      // ── FIRST ACTIVATION ──
+      if (pwd.expiry && pwd.expiry < now)
+        return res.json({ ok: false, msg: 'Code expire ho gaya — naya lo' });
 
-  if (!pwd.used) {
-    // First activation
-    pwd.used = true;
-    pwd.activatedAt = now;
-    pwd.userExpiry = now + (pwd.days * 86400000);
-    pwd.deviceId = deviceId || null;
-    pwd.sessionActive = true;
-    pwd.lastLoginAt = now;
-    save(d);
-  } else {
-    // Re-login (ya server restart ke baad pehli baar)
-    if (pwd.deviceId && deviceId && pwd.deviceId !== deviceId) {
-      return res.json({ ok: false, msg: 'Ye code doosre phone pe use ho chuka hai. Naya lo — Telegram pe aao' });
+      const userExpiry = now + (pwd.days * 86400000);
+
+      await PWD_COL.doc(clean).update({
+        used:          true,
+        activatedAt:   now,
+        userExpiry,
+        deviceId:      deviceId || null,
+        sessionActive: true,
+        lastLoginAt:   now,
+      });
+
+      const plan       = PLANS[String(pwd.days)] || PLANS['30'];
+      const appData    = await getAppData();
+      const prediction = getPlanPrediction(appData.today, plan.label);
+      const daysLeft   = Math.ceil((userExpiry - now) / 86400000);
+
+      return res.json({
+        ok: true,
+        daysLeft,
+        plan,
+        locations:     plan.locations,
+        hasPrediction: !!prediction,
+        prediction:    prediction || null,
+        ad: (appData.ad && appData.ad.enabled) ? appData.ad : null,
+      });
+
+    } else {
+      // ── RE-LOGIN ──
+      if (!pwd.userExpiry || pwd.userExpiry < now)
+        return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
+
+      if (pwd.deviceId && deviceId && pwd.deviceId !== deviceId)
+        return res.json({ ok: false, msg: 'Ye code doosre phone pe use ho chuka hai. Naya lo — Telegram pe aao' });
+
+      const updates = { sessionActive: true, lastLoginAt: now };
+      if (!pwd.deviceId && deviceId) updates.deviceId = deviceId;
+      await PWD_COL.doc(clean).update(updates);
+
+      const daysLeft   = Math.ceil((pwd.userExpiry - now) / 86400000);
+      const plan       = PLANS[String(pwd.days)] || PLANS['30'];
+      const appData    = await getAppData();
+      const prediction = getPlanPrediction(appData.today, plan.label);
+
+      return res.json({
+        ok: true,
+        daysLeft,
+        plan,
+        locations:     plan.locations,
+        hasPrediction: !!prediction,
+        prediction:    prediction || null,
+        ad: (appData.ad && appData.ad.enabled) ? appData.ad : null,
+      });
     }
-    if (!pwd.deviceId && deviceId) pwd.deviceId = deviceId;
-    pwd.sessionActive = true;
-    pwd.lastLoginAt = now;
-    save(d);
+  } catch (e) {
+    console.error('/access error:', e.message);
+    return res.json({ ok: false, msg: 'Server error — try again' });
   }
-
-  if (!pwd.userExpiry || pwd.userExpiry < now) {
-    return res.json({ ok: false, msg: 'Access expire ho gaya — naya code lo' });
-  }
-
-  const daysLeft = Math.ceil((pwd.userExpiry - now) / 86400000);
-  const plan = PLANS[String(pwd.days)] || PLANS['30'];
-  const prediction = getPlanPrediction(d.today, plan.label);
-
-  return res.json({
-    ok: true,
-    daysLeft,
-    plan,
-    locations: plan.locations,
-    hasPrediction: !!prediction,
-    prediction: prediction || null,
-    ad: (d.ad && d.ad.enabled) ? d.ad : null,
-  });
 });
 
-// ─── PUBLIC: Get Ad ───────────────────────────────────────────────────────────
-app.get('/ad', (req, res) => {
-  const d = load();
-  res.json({ ok: true, ad: (d.ad && d.ad.enabled) ? d.ad : null });
+// ── PUBLIC: Get Ad ─────────────────────────────────────────
+app.get('/ad', async (req, res) => {
+  try {
+    const appData = await getAppData();
+    res.json({ ok: true, ad: (appData.ad && appData.ad.enabled) ? appData.ad : null });
+  } catch (e) { res.json({ ok: true, ad: null }); }
 });
 
-// ─── ADMIN: Get all data ──────────────────────────────────────────────────────
-app.get('/admin/data', (req, res) => {
+// ══════════════════════════════════════════════════════════
+// ADMIN APIS — all use x-pass header for auth
+// ══════════════════════════════════════════════════════════
+
+// ── Get all data (same format as old /admin/data) ─────────
+app.get('/admin/data', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
-  return res.json({ ok: true, ...load() });
+  try {
+    const [appData, pwdSnap] = await Promise.all([
+      getAppData(),
+      PWD_COL.get(),
+    ]);
+    const passwords = pwdSnap.docs.map(d => d.data());
+    return res.json({
+      ok:       true,
+      passwords,
+      today:    appData.today   || null,
+      sold:     appData.sold    || 0,
+      revenue:  appData.revenue || 0,
+      ad:       appData.ad      || null,
+    });
+  } catch (e) {
+    console.error('/admin/data:', e.message);
+    return res.status(500).json({ ok: false, msg: e.message });
+  }
 });
 
-// ─── ADMIN: Generate access code ─────────────────────────────────────────────
-app.post('/admin/pwd', (req, res) => {
+// ── Generate access code ───────────────────────────────────
+app.post('/admin/pwd', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
   const { name = 'User', days = 30 } = req.body;
-  const d = load();
-  const code = genCode();
-  const now = Date.now();
   const plan = PLANS[String(days)] || PLANS['30'];
+  const code = genCode();
+  const now  = Date.now();
 
-  d.passwords.push({
+  const pwdData = {
     code,
     name,
-    days: plan.days,
-    price: plan.price,
-    createdAt: now,
-    expiry: now + (30 * 86400000),
-    used: false,
-    userExpiry: null,
-    activatedAt: null,
-    deviceId: null,
+    days:          plan.days,
+    price:         plan.price,
+    createdAt:     now,
+    expiry:        now + (30 * 86400000), // 30 days to first-time activate
+    used:          false,
+    userExpiry:    null,
+    activatedAt:   null,
+    deviceId:      null,
     sessionActive: false,
-    lastLoginAt: null,
-  });
+    lastLoginAt:   null,
+  };
 
-  d.sold = (d.sold || 0) + 1;
-  d.revenue = (d.revenue || 0) + plan.price;
-  save(d);
-
-  return res.json({ ok: true, code, days: plan.days, name, price: plan.price });
+  try {
+    await PWD_COL.doc(code).set(pwdData);
+    // Update sold + revenue counters
+    const appData = await getAppData();
+    await APP_DOC.set({
+      today:   appData.today   || null,
+      ad:      appData.ad      || null,
+      sold:    (appData.sold   || 0) + 1,
+      revenue: (appData.revenue || 0) + plan.price,
+    });
+    return res.json({ ok: true, code, days: plan.days, name, price: plan.price });
+  } catch (e) {
+    console.error('/admin/pwd:', e.message);
+    return res.status(500).json({ ok: false, msg: e.message });
+  }
 });
 
-// ─── ADMIN: Delete access code ────────────────────────────────────────────────
-app.delete('/admin/pwd/:code', (req, res) => {
+// ── Delete access code ─────────────────────────────────────
+app.delete('/admin/pwd/:code', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
-  const d = load();
-  d.passwords = d.passwords.filter(p => p.code !== req.params.code);
-  save(d);
-  return res.json({ ok: true });
+  try {
+    await PWD_COL.doc(req.params.code).delete();
+    return res.json({ ok: true });
+  } catch (e) { return res.status(500).json({ ok: false, msg: e.message }); }
 });
 
-// ─── ADMIN: Force logout a user ───────────────────────────────────────────────
-// Sets sessionActive=false and clears deviceId.
-// User's next /verify call will return "Session expired" — app se bahar ho jayega.
-app.post('/admin/logout/:code', (req, res) => {
+// ── Force logout user ──────────────────────────────────────
+// sessionActive=false + deviceId=null → next /verify = "Session expired"
+app.post('/admin/logout/:code', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
-  const d = load();
-  const pwd = d.passwords.find(p => p.code === req.params.code);
-  if (!pwd) return res.json({ ok: false, msg: 'Code not found' });
-  pwd.sessionActive = false;
-  pwd.deviceId = null;
-  save(d);
-  return res.json({ ok: true, msg: 'User force logged out' });
+  try {
+    const pwd = await getPassword(req.params.code);
+    if (!pwd) return res.json({ ok: false, msg: 'Code not found' });
+    await PWD_COL.doc(req.params.code).update({
+      sessionActive: false,
+      deviceId:      null,
+    });
+    return res.json({ ok: true, msg: 'User force logged out' });
+  } catch (e) { return res.status(500).json({ ok: false, msg: e.message }); }
 });
 
-// ─── ADMIN: Set today's prediction ───────────────────────────────────────────
-app.post('/admin/predict', (req, res) => {
+// ── Set today's prediction ─────────────────────────────────
+app.post('/admin/predict', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
   const { plan99, plan199, plan599, extraNums } = req.body;
-  const d = load();
-  d.today = {
-    date: new Date().toLocaleDateString('en-IN'),
-    plan99: plan99 || null,
-    plan199: plan199 || null,
-    plan599: plan599 || null,
-    extraNums: (extraNums || []).slice(0, 8),
-  };
-  save(d);
-  return res.json({ ok: true, prediction: d.today });
+  try {
+    const appData = await getAppData();
+    const today = {
+      date:     new Date().toLocaleDateString('en-IN'),
+      plan99:   plan99  || null,
+      plan199:  plan199 || null,
+      plan599:  plan599 || null,
+      extraNums: (extraNums || []).slice(0, 8),
+    };
+    await APP_DOC.set({ ...appData, today });
+    return res.json({ ok: true, prediction: today });
+  } catch (e) { return res.status(500).json({ ok: false, msg: e.message }); }
 });
 
-// ─── ADMIN: Clear today's prediction ─────────────────────────────────────────
-app.delete('/admin/today', (req, res) => {
+// ── Clear today's prediction ───────────────────────────────
+app.delete('/admin/today', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
-  const d = load();
-  d.today = null;
-  save(d);
-  return res.json({ ok: true });
+  try {
+    const appData = await getAppData();
+    await APP_DOC.set({ ...appData, today: null });
+    return res.json({ ok: true });
+  } catch (e) { return res.status(500).json({ ok: false, msg: e.message }); }
 });
 
-// ─── ADMIN: Get ad ────────────────────────────────────────────────────────────
-app.get('/admin/ad', (req, res) => {
+// ── Ad management ──────────────────────────────────────────
+app.get('/admin/ad', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
-  return res.json({ ok: true, ad: load().ad || null });
+  try {
+    const appData = await getAppData();
+    return res.json({ ok: true, ad: appData.ad || null });
+  } catch (e) { return res.status(500).json({ ok: false, msg: e.message }); }
 });
 
-// ─── ADMIN: Set ad ────────────────────────────────────────────────────────────
-app.post('/admin/ad', (req, res) => {
+app.post('/admin/ad', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
   const { enabled, text, link, label } = req.body;
-  const d = load();
-  d.ad = { enabled: !!enabled, text: text || '', link: link || '', label: label || 'Contact Karo' };
-  save(d);
-  return res.json({ ok: true, ad: d.ad });
+  try {
+    const appData = await getAppData();
+    const ad = { enabled: !!enabled, text: text || '', link: link || '', label: label || 'Contact Karo' };
+    await APP_DOC.set({ ...appData, ad });
+    return res.json({ ok: true, ad });
+  } catch (e) { return res.status(500).json({ ok: false, msg: e.message }); }
 });
 
-// ─── ADMIN: Delete ad ────────────────────────────────────────────────────────
-app.delete('/admin/ad', (req, res) => {
+app.delete('/admin/ad', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false });
-  const d = load();
-  d.ad = null;
-  save(d);
-  return res.json({ ok: true });
+  try {
+    const appData = await getAppData();
+    await APP_DOC.set({ ...appData, ad: null });
+    return res.json({ ok: true });
+  } catch (e) { return res.status(500).json({ ok: false, msg: e.message }); }
 });
 
-// ─── START SERVER ─────────────────────────────────────────────────────────────
+// ─── START ────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('Server running on port ' + PORT);
+  console.log('WIN.X.KING Firebase server on port ' + PORT);
 });
