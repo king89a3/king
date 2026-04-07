@@ -1,5 +1,5 @@
 {
-  "name": "winxking-server",
+  "name": "predictor-ai",
   "version": "2.0.0",
   "main": "server.js",
   "scripts": {
