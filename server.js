@@ -50,7 +50,14 @@ app.use(express.json({ limit: '10mb' }));
 async function getMeta() {
   const snap = await META_DOC.get();
   const data = snap.exists ? snap.data() : {};
-  return { today: data.today || null, sold: data.sold || 0, revenue: data.revenue || 0, ad: data.ad || null };
+  // today stored as JSON string to avoid Firestore nested-array limits
+  let today = null;
+  if (data.todayJson) {
+    try { today = JSON.parse(data.todayJson); } catch(e) { today = null; }
+  } else if (data.today && typeof data.today === 'object') {
+    today = data.today; // legacy fallback
+  }
+  return { today, sold: data.sold || 0, revenue: data.revenue || 0, ad: data.ad || null };
 }
 
 async function setMeta(updates) {
@@ -253,7 +260,8 @@ app.post('/admin/predict', async (req, res) => {
       plan599: plan599 || null,
       extraNums: (extraNums || []).slice(0, 8)
     };
-    await setMeta({ today });
+    // Store as JSON string — avoids Firestore nested array/object limits
+    await setMeta({ todayJson: JSON.stringify(today), today: null });
     return res.json({ ok: true, prediction: today });
   } catch (e) {
     console.error('/admin/predict error:', e.message);
@@ -264,7 +272,7 @@ app.post('/admin/predict', async (req, res) => {
 app.delete('/admin/today', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false, msg: 'Unauthorized' });
   try {
-    await setMeta({ today: null });
+    await setMeta({ todayJson: null, today: null });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
