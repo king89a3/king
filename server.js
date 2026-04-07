@@ -1,5 +1,6 @@
 const express = require('express');
 const cors    = require('cors');
+const path    = require('path');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore }        = require('firebase-admin/firestore');
 
@@ -11,16 +12,35 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
 
 // ─── FIREBASE INIT ────────────────────────────────────────
-initializeApp({
-  credential: cert({
+// Try JSON file first (most reliable), fallback to env vars
+let firebaseCred;
+try {
+  // If JSON file is present in same folder (recommended for Render)
+  firebaseCred = require('./winxking12-c1bc1-firebase-adminsdk-fbsvc-2da3b232d7.json');
+} catch(e) {
+  // Fallback: use environment variables
+  firebaseCred = {
     projectId:   process.env.FIREBASE_PROJECT_ID,
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey:  process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  })
-});
+    privateKey:  (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+  };
+}
+
+initializeApp({ credential: cert(firebaseCred) });
 const db      = getFirestore();
 const PWD_COL = db.collection('passwords');
 const APP_DOC = db.collection('appdata').doc('main');
+
+// ─── SERVE ADMIN HTML (fixes file:// problem completely) ──
+// Admin panel opens at: https://your-render-url.onrender.com/admin
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin.html'));
+});
+
+// ─── SERVE USER APP ───────────────────────────────────────
+app.get('/app', (req, res) => {
+  res.sendFile(path.join(__dirname, 'user-app.html'));
+});
 
 // ─── AUTH ─────────────────────────────────────────────────
 function isAdmin(req) {
@@ -60,8 +80,15 @@ function getPlanPrediction(today, planLabel) {
 async function getApp() {
   try {
     const s = await APP_DOC.get();
-    return s.exists ? s.data() : { sold:0, revenue:0, ad:null, today:null };
-  } catch(e) { return { sold:0, revenue:0, ad:null, today:null }; }
+    if (s.exists) return s.data();
+    // First run — create the doc so future reads work
+    const def = { sold:0, revenue:0, ad:null, today:null };
+    await APP_DOC.set(def);
+    return def;
+  } catch(e) {
+    console.error('getApp error:', e.message);
+    return { sold:0, revenue:0, ad:null, today:null };
+  }
 }
 
 async function getPwd(code) {
@@ -71,7 +98,8 @@ async function getPwd(code) {
   } catch(e) { return null; }
 }
 
-// ─── PUBLIC: Verify session ───────────────────────────────
+// ─── HEALTH ───────────────────────────────────────────────
+app.get('/', (req, res) => res.json({ status: 'OK' }));
 app.post('/verify', async (req, res) => {
   const { code, deviceId } = req.body;
   if (!code) return res.json({ ok:false, msg:'Code daalo' });
@@ -168,10 +196,17 @@ app.get('/ad', async (req, res) => {
 
 // ─── ADMIN: Get all data ──────────────────────────────────
 app.get('/admin/data', async (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ ok:false });
+  if (!isAdmin(req)) return res.status(401).json({ ok:false, msg:'Unauthorized' });
   try {
-    const [appData, snap] = await Promise.all([ getApp(), PWD_COL.get() ]);
-    const passwords = snap.docs.map(d => d.data());
+    const appData = await getApp();
+    let passwords = [];
+    try {
+      const snap = await PWD_COL.get();
+      passwords = snap.docs.map(d => d.data());
+    } catch(e) {
+      console.error('PWD_COL.get error:', e.message);
+      // Not fatal — return empty list
+    }
     return res.json({
       ok:true, passwords,
       today:   appData.today   || null,
@@ -181,7 +216,7 @@ app.get('/admin/data', async (req, res) => {
     });
   } catch(e) {
     console.error('/admin/data:', e.message);
-    return res.status(500).json({ ok:false, msg:e.message });
+    return res.status(500).json({ ok:false, msg: e.message });
   }
 });
 
@@ -302,7 +337,10 @@ app.delete('/admin/ad', async (req, res) => {
   } catch(e) { return res.status(500).json({ ok:false, msg:e.message }); }
 });
 
+// ─── 404 HANDLER ─────────────────────────────────────────
+app.use((req, res) => res.status(404).json({ ok:false, msg:'Not found' }));
+
 // ─── START ────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('WIN.X.KING Firebase server on port ' + PORT);
+  console.log('WIN.X.KING server on port ' + PORT);
 });
