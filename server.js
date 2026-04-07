@@ -22,7 +22,16 @@ const META_DOC = db.collection('winxking').doc('meta');
 const PASSWORDS_COL = db.collection('winxking').doc('meta').collection('passwords');
 
 // ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
-app.use(cors({ origin: '*' }));
+const corsOptions = {
+  origin: function (origin, callback) {
+    callback(null, true);
+  },
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS', 'PUT', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'x-pass', 'Authorization'],
+  credentials: false,
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 
 // ─── DB HELPERS ───────────────────────────────────────────────────────────────
