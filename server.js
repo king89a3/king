@@ -46,76 +46,42 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 
+// ─── DB HELPERS (errors ab dikhenge) ─────────────────────────────────────────
 async function getMeta() {
-  try {
-    const snap = await META_DOC.get();
-    const data = snap.exists ? snap.data() : {};
-    return { today: data.today || null, sold: data.sold || 0, revenue: data.revenue || 0, ad: data.ad || null };
-  } catch (e) {
-    console.error('getMeta error:', e.message);
-    return { today: null, sold: 0, revenue: 0, ad: null };
-  }
+  const snap = await META_DOC.get();
+  const data = snap.exists ? snap.data() : {};
+  return { today: data.today || null, sold: data.sold || 0, revenue: data.revenue || 0, ad: data.ad || null };
 }
 
 async function setMeta(updates) {
-  try {
-    await META_DOC.set(updates, { merge: true });
-    return true;
-  } catch (e) {
-    console.error('setMeta error:', e.message);
-    return false;
-  }
+  await META_DOC.set(updates, { merge: true });
+  return true;
 }
 
 async function getAllPasswords() {
-  try {
-    const snap = await PASSWORDS_COL.get();
-    return snap.docs.map(d => ({ ...d.data(), _id: d.id }));
-  } catch (e) {
-    console.error('getAllPasswords error:', e.message);
-    return [];
-  }
+  const snap = await PASSWORDS_COL.get();
+  return snap.docs.map(d => ({ ...d.data(), _id: d.id }));
 }
 
 async function getPassword(code) {
-  try {
-    const snap = await PASSWORDS_COL.doc(code).get();
-    if (!snap.exists) return null;
-    return { ...snap.data(), _id: snap.id };
-  } catch (e) {
-    console.error('getPassword error:', e.message);
-    return null;
-  }
+  const snap = await PASSWORDS_COL.doc(code).get();
+  if (!snap.exists) return null;
+  return { ...snap.data(), _id: snap.id };
 }
 
 async function setPassword(code, data) {
-  try {
-    await PASSWORDS_COL.doc(code).set(data, { merge: true });
-    return true;
-  } catch (e) {
-    console.error('setPassword error:', e.message);
-    return false;
-  }
+  await PASSWORDS_COL.doc(code).set(data, { merge: true });
+  return true;
 }
 
 async function createPassword(code, data) {
-  try {
-    await PASSWORDS_COL.doc(code).set(data);
-    return true;
-  } catch (e) {
-    console.error('createPassword error:', e.message);
-    return false;
-  }
+  await PASSWORDS_COL.doc(code).set(data);
+  return true;
 }
 
 async function deletePassword(code) {
-  try {
-    await PASSWORDS_COL.doc(code).delete();
-    return true;
-  } catch (e) {
-    console.error('deletePassword error:', e.message);
-    return false;
-  }
+  await PASSWORDS_COL.doc(code).delete();
+  return true;
 }
 
 function isAdmin(req) { return req.headers['x-pass'] === PASS; }
@@ -144,14 +110,24 @@ function getPlanPrediction(today, planLabel) {
   return { date: today.date, locations: today[key].locations || [], extraNums: today.extraNums || [] };
 }
 
+// ─── ROOT ─────────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ ok: true, msg: 'WIN.X.KING Server is live!' });
 });
 
-app.get('/health', (req, res) => {
-  res.json({ ok: true, status: 'healthy' });
+// ─── FIRESTORE TEST (browser se test karo) ───────────────────────────────────
+app.get('/admin/debug', async (req, res) => {
+  if (req.query.p !== PASS && !isAdmin(req)) return res.status(401).json({ ok: false, msg: 'Password wrong' });
+  try {
+    await db.collection('winxking').doc('meta').set({ debugTest: Date.now() }, { merge: true });
+    const snap = await db.collection('winxking').doc('meta').get();
+    return res.json({ ok: true, msg: 'Firestore bilkul theek hai! Sab kaam kar raha hai.', data: snap.data() });
+  } catch (e) {
+    return res.json({ ok: false, msg: 'Firestore Error: ' + e.message, code: e.code || 'unknown', fix: 'Firebase Console pe jao → Firestore Database → Create Database karo' });
+  }
 });
 
+// ─── PUBLIC ROUTES ────────────────────────────────────────────────────────────
 app.post('/verify', async (req, res) => {
   try {
     const { code, deviceId } = req.body || {};
@@ -170,7 +146,7 @@ app.post('/verify', async (req, res) => {
     return res.json({ ok: true, daysLeft, plan, locations: plan.locations, hasPrediction: !!prediction, prediction: prediction || null, ad: (meta.ad && meta.ad.enabled) ? meta.ad : null });
   } catch (e) {
     console.error('/verify error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Server error: ' + e.message });
   }
 });
 
@@ -201,7 +177,7 @@ app.post('/access', async (req, res) => {
     return res.json({ ok: true, daysLeft, plan, locations: plan.locations, hasPrediction: !!prediction, prediction: prediction || null, ad: (meta.ad && meta.ad.enabled) ? meta.ad : null });
   } catch (e) {
     console.error('/access error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Server error: ' + e.message });
   }
 });
 
@@ -212,6 +188,7 @@ app.get('/ad', async (req, res) => {
   } catch (e) { res.json({ ok: true, ad: null }); }
 });
 
+// ─── ADMIN ROUTES ─────────────────────────────────────────────────────────────
 app.get('/admin/data', async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false, msg: 'Unauthorized' });
   try {
@@ -219,7 +196,7 @@ app.get('/admin/data', async (req, res) => {
     return res.json({ ok: true, ...meta, passwords });
   } catch (e) {
     console.error('/admin/data error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error: ' + e.message });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
@@ -232,13 +209,12 @@ app.post('/admin/pwd', async (req, res) => {
     const plan = PLANS[String(days)] || PLANS['30'];
     const pwdData = { code, name, days: plan.days, price: plan.price, createdAt: now, expiry: now + (30 * 86400000), used: false, userExpiry: null, activatedAt: null, deviceId: null, sessionActive: false, lastLoginAt: null };
     const meta = await getMeta();
-    const saved = await createPassword(code, pwdData);
-    if (!saved) return res.status(500).json({ ok: false, msg: 'Firebase mein save nahi hua' });
+    await createPassword(code, pwdData);
     await setMeta({ sold: (meta.sold || 0) + 1, revenue: (meta.revenue || 0) + plan.price });
     return res.json({ ok: true, code, days: plan.days, name, price: plan.price });
   } catch (e) {
     console.error('/admin/pwd error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error: ' + e.message });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
@@ -249,7 +225,7 @@ app.delete('/admin/pwd/:code', async (req, res) => {
     return res.json({ ok: true });
   } catch (e) {
     console.error('/admin/pwd delete error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
@@ -262,7 +238,7 @@ app.post('/admin/logout/:code', async (req, res) => {
     return res.json({ ok: true, msg: 'User force logged out' });
   } catch (e) {
     console.error('/admin/logout error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
@@ -281,7 +257,7 @@ app.post('/admin/predict', async (req, res) => {
     return res.json({ ok: true, prediction: today });
   } catch (e) {
     console.error('/admin/predict error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
@@ -291,8 +267,7 @@ app.delete('/admin/today', async (req, res) => {
     await setMeta({ today: null });
     return res.json({ ok: true });
   } catch (e) {
-    console.error('/admin/today error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
@@ -302,8 +277,7 @@ app.get('/admin/ad', async (req, res) => {
     const meta = await getMeta();
     return res.json({ ok: true, ad: meta.ad || null });
   } catch (e) {
-    console.error('/admin/ad get error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
@@ -315,8 +289,7 @@ app.post('/admin/ad', async (req, res) => {
     await setMeta({ ad });
     return res.json({ ok: true, ad });
   } catch (e) {
-    console.error('/admin/ad post error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
@@ -326,8 +299,7 @@ app.delete('/admin/ad', async (req, res) => {
     await setMeta({ ad: null });
     return res.json({ ok: true });
   } catch (e) {
-    console.error('/admin/ad delete error:', e.message);
-    return res.status(500).json({ ok: false, msg: 'Server error' });
+    return res.status(500).json({ ok: false, msg: 'Firestore error: ' + e.message });
   }
 });
 
